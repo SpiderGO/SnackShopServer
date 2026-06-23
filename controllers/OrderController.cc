@@ -487,3 +487,101 @@ void OrderController::listOrders(
 
     callback(makeJsonResponse(result));
 }
+
+void OrderController::updateOrderStatus(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    int orderId)
+{
+    auto json = req->getJsonObject();
+
+    if (!json || !json->isMember("status") || !(*json)["status"].isString()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("invalid request body"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string status = (*json)["status"].asString();
+
+    if (status != "待商家确认" &&
+        status != "已接单" &&
+        status != "已完成") {
+        callback(makeJsonResponse(
+            makeErrorResponse("invalid order status"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to open database"),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* sql =
+        "UPDATE orders "
+        "SET status = ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare status update: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, orderId);
+
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to update order status: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_finalize(stmt);
+
+    int changedRows = sqlite3_changes(db);
+    sqlite3_close(db);
+
+    if (changedRows == 0) {
+        callback(makeJsonResponse(
+            makeErrorResponse("order not found"),
+            k404NotFound
+        ));
+        return;
+    }
+
+    Json::Value data;
+    data["id"] = orderId;
+    data["status"] = status;
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = data;
+
+    callback(makeJsonResponse(result));
+}
