@@ -85,7 +85,50 @@ bool execSql(sqlite3* db, const char* sql, std::string& error) {
 
 bool isMerchantAuthorized(const HttpRequestPtr& req) {
     std::string auth = req->getHeader("Authorization");
-    return auth == "Bearer dev-merchant-token";
+    const std::string prefix = "Bearer ";
+
+    if (auth.rfind(prefix, 0) != 0) {
+        return false;
+    }
+
+    std::string token = auth.substr(prefix.size());
+
+    if (token.empty()) {
+        return false;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        return false;
+    }
+
+    const char* sql =
+        "SELECT id "
+        "FROM merchant_sessions "
+        "WHERE token = ? "
+        "AND enabled = 1 "
+        "AND expires_at > datetime('now', 'localtime') "
+        "LIMIT 1;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+
+    bool authorized = (rc == SQLITE_ROW);
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    return authorized;
 }
 
 HttpResponsePtr makeUnauthorizedResponse() {

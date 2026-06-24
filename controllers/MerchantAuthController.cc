@@ -4,6 +4,9 @@
 
 #include <string>
 #include <vector>
+#include <chrono>
+#include <random>
+#include <sstream>
 
 namespace {
 
@@ -58,6 +61,21 @@ std::string getTextColumn(sqlite3_stmt* stmt, int index) {
     }
 
     return reinterpret_cast<const char*>(text);
+}
+
+std::string generateToken() {
+    auto now = std::chrono::system_clock::now()
+                   .time_since_epoch()
+                   .count();
+
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<unsigned long long> dist;
+
+    std::ostringstream oss;
+    oss << "merchant-" << std::hex << now << "-" << dist(gen);
+
+    return oss.str();
 }
 
 }
@@ -141,13 +159,86 @@ void MerchantAuthController::login(
     std::string role = getTextColumn(stmt, 2);
 
     sqlite3_finalize(stmt);
+
+    std::string token = generateToken();
+
+    const char* disableOldSessionSql =
+        "UPDATE merchant_sessions "
+        "SET enabled = 0 "
+        "WHERE merchant_id = ?;";
+
+    sqlite3_stmt* disableStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, disableOldSessionSql, -1, &disableStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to prepare old session update: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(disableStmt, 1, merchantId);
+    rc = sqlite3_step(disableStmt);
+    sqlite3_finalize(disableStmt);
+
+    if (rc != SQLITE_DONE) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to disable old sessions: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* insertSessionSql =
+        "INSERT INTO merchant_sessions "
+        "(merchant_id, token, enabled, expires_at) "
+        "VALUES (?, ?, 1, datetime('now', 'localtime', '+7 days'));";
+
+    sqlite3_stmt* sessionStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, insertSessionSql, -1, &sessionStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to prepare session insert: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(sessionStmt, 1, merchantId);
+    sqlite3_bind_text(sessionStmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(sessionStmt);
+    sqlite3_finalize(sessionStmt);
+
+    if (rc != SQLITE_DONE) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to create session: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
     sqlite3_close(db);
 
     Json::Value data;
     data["merchantId"] = merchantId;
     data["username"] = merchantUsername;
     data["role"] = role;
-    data["token"] = "dev-merchant-token";
+    data["token"] = token;
 
     Json::Value result;
     result["code"] = 0;
