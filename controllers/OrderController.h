@@ -10,6 +10,11 @@ public:
     METHOD_LIST_BEGIN
 
     ADD_METHOD_TO(
+        OrderController::listMerchantOrders,
+        "/api/merchant/orders",
+        Get);
+
+    ADD_METHOD_TO(
         OrderController::updateOrderStatus,
         "/api/orders/{1}/status",
         Patch);
@@ -38,4 +43,8 @@ public:
         const HttpRequestPtr& req,
         std::function<void(const HttpResponsePtr&)>&& callback,
         int orderId);
+    
+    void listMerchantOrders(
+        const HttpRequestPtr& req,
+        std::function<void(const HttpResponsePtr&)>&& callback);
 };

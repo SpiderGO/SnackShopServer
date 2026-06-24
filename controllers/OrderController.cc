@@ -83,6 +83,22 @@ bool execSql(sqlite3* db, const char* sql, std::string& error) {
     return true;
 }
 
+bool isMerchantAuthorized(const HttpRequestPtr& req) {
+    std::string auth = req->getHeader("Authorization");
+    return auth == "Bearer dev-merchant-token";
+}
+
+HttpResponsePtr makeUnauthorizedResponse() {
+    Json::Value result;
+    result["code"] = 1;
+    result["message"] = "unauthorized";
+    result["data"] = Json::objectValue;
+
+    auto resp = HttpResponse::newHttpJsonResponse(result);
+    resp->setStatusCode(k401Unauthorized);
+    return resp;
+}
+
 }
 
 void OrderController::createOrder(
@@ -104,6 +120,24 @@ void OrderController::createOrder(
     if (items.empty()) {
         callback(makeJsonResponse(
             makeErrorResponse("order items cannot be empty"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (!json->isMember("customerId") || !(*json)["customerId"].isString()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerId is required"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string customerId = (*json)["customerId"].asString();
+
+    if (customerId.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerId cannot be empty"),
             k400BadRequest
         ));
         return;
@@ -228,8 +262,8 @@ void OrderController::createOrder(
     sqlite3_finalize(queryStmt);
 
     const char* insertOrderSql =
-        "INSERT INTO orders (total_amount, status, pickup_type, created_at) "
-        "VALUES (?, '待商家确认', ?, datetime('now', 'localtime'));";
+        "INSERT INTO orders (customer_id, total_amount, status, pickup_type, created_at) "
+        "VALUES (?, ?, '待商家确认', ?, datetime('now', 'localtime'));";
 
     sqlite3_stmt* insertOrderStmt = nullptr;
     rc = sqlite3_prepare_v2(db, insertOrderSql, -1, &insertOrderStmt, nullptr);
@@ -246,8 +280,9 @@ void OrderController::createOrder(
         return;
     }
 
-    sqlite3_bind_double(insertOrderStmt, 1, totalAmount);
-    sqlite3_bind_text(insertOrderStmt, 2, pickupType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insertOrderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(insertOrderStmt, 2, totalAmount);
+    sqlite3_bind_text(insertOrderStmt, 3, pickupType.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(insertOrderStmt);
 
@@ -391,6 +426,16 @@ void OrderController::listOrders(
     const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback)
 {
+    std::string customerId = req->getParameter("customerId");
+
+    if (customerId.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerId is required"),
+            k400BadRequest
+        ));
+        return;
+    }
+
     (void)req;
 
     sqlite3* db = nullptr;
@@ -406,6 +451,7 @@ void OrderController::listOrders(
     const char* orderSql =
         "SELECT id, total_amount, status, pickup_type, created_at "
         "FROM orders "
+        "WHERE customer_id = ? "
         "ORDER BY id DESC;";
 
     sqlite3_stmt* orderStmt = nullptr;
@@ -444,6 +490,8 @@ void OrderController::listOrders(
         ));
         return;
     }
+
+    sqlite3_bind_text(orderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
 
     while ((rc = sqlite3_step(orderStmt)) == SQLITE_ROW) {
         long long orderId = sqlite3_column_int64(orderStmt, 0);
@@ -493,6 +541,11 @@ void OrderController::updateOrderStatus(
     std::function<void(const HttpResponsePtr&)>&& callback,
     int orderId)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
     auto json = req->getJsonObject();
 
     if (!json || !json->isMember("status") || !(*json)["status"].isString()) {
@@ -582,6 +635,109 @@ void OrderController::updateOrderStatus(
     result["code"] = 0;
     result["message"] = "success";
     result["data"] = data;
+
+    callback(makeJsonResponse(result));
+}
+
+void OrderController::listMerchantOrders(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback)
+{
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to open database"),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* orderSql =
+        "SELECT id, total_amount, status, pickup_type, created_at "
+        "FROM orders "
+        "ORDER BY id DESC;";
+
+    sqlite3_stmt* orderStmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, orderSql, -1, &orderStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to query merchant orders: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* itemSql =
+        "SELECT product_id, product_name, price, quantity "
+        "FROM order_items "
+        "WHERE order_id = ? "
+        "ORDER BY id ASC;";
+
+    sqlite3_stmt* itemStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, itemSql, -1, &itemStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(orderStmt);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare merchant order item query: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    Json::Value orders(Json::arrayValue);
+
+    while ((rc = sqlite3_step(orderStmt)) == SQLITE_ROW) {
+        long long orderId = sqlite3_column_int64(orderStmt, 0);
+
+        Json::Value order;
+        order["id"] = static_cast<Json::Int64>(orderId);
+        order["totalAmount"] = sqlite3_column_double(orderStmt, 1);
+        order["status"] = getTextColumn(orderStmt, 2);
+        order["pickupType"] = getTextColumn(orderStmt, 3);
+        order["createdAt"] = getTextColumn(orderStmt, 4);
+
+        Json::Value orderItems(Json::arrayValue);
+
+        sqlite3_reset(itemStmt);
+        sqlite3_clear_bindings(itemStmt);
+        sqlite3_bind_int64(itemStmt, 1, orderId);
+
+        while (sqlite3_step(itemStmt) == SQLITE_ROW) {
+            Json::Value product;
+            product["id"] = sqlite3_column_int(itemStmt, 0);
+            product["name"] = getTextColumn(itemStmt, 1);
+            product["price"] = sqlite3_column_double(itemStmt, 2);
+            product["quantity"] = sqlite3_column_int(itemStmt, 3);
+
+            orderItems.append(product);
+        }
+
+        order["items"] = orderItems;
+        orders.append(order);
+    }
+
+    sqlite3_finalize(itemStmt);
+    sqlite3_finalize(orderStmt);
+    sqlite3_close(db);
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = orders;
 
     callback(makeJsonResponse(result));
 }

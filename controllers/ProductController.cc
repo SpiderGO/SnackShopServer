@@ -51,6 +51,22 @@ std::string getTextColumn(sqlite3_stmt* stmt, int index) {
     return reinterpret_cast<const char*>(text);
 }
 
+bool isMerchantAuthorized(const HttpRequestPtr& req) {
+    std::string auth = req->getHeader("Authorization");
+    return auth == "Bearer dev-merchant-token";
+}
+
+HttpResponsePtr makeUnauthorizedResponse() {
+    Json::Value result;
+    result["code"] = 1;
+    result["message"] = "unauthorized";
+    result["data"] = Json::objectValue;
+
+    auto resp = HttpResponse::newHttpJsonResponse(result);
+    resp->setStatusCode(k401Unauthorized);
+    return resp;
+}
+
 }
 
 void ProductController::listProducts(
@@ -125,6 +141,11 @@ void ProductController::updateStock(
     std::function<void(const HttpResponsePtr&)>&& callback,
     int productId)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
     auto json = req->getJsonObject();
 
     if (!json || !json->isMember("stock") || !(*json)["stock"].isInt()) {
@@ -227,6 +248,11 @@ void ProductController::createProduct(
     const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
     auto json = req->getJsonObject();
 
     if (!json ||
@@ -332,6 +358,11 @@ void ProductController::listAllProductsForMerchant(
     const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
     (void)req;
 
     sqlite3* db = nullptr;
@@ -397,6 +428,11 @@ void ProductController::updateEnabled(
     std::function<void(const HttpResponsePtr&)>&& callback,
     int productId)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+    
     auto json = req->getJsonObject();
 
     if (!json || !json->isMember("enabled") || !(*json)["enabled"].isBool()) {
@@ -491,6 +527,11 @@ void ProductController::updateProduct(
     std::function<void(const HttpResponsePtr&)>&& callback,
     int productId)
 {
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
     auto json = req->getJsonObject();
 
     if (!json ||
