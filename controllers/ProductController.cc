@@ -327,3 +327,161 @@ void ProductController::createProduct(
     auto resp = HttpResponse::newHttpJsonResponse(result);
     callback(resp);
 }
+
+void ProductController::listAllProductsForMerchant(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback)
+{
+    (void)req;
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to open database")
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    const char* sql =
+        "SELECT id, name, category, price, stock, enabled "
+        "FROM products "
+        "ORDER BY id ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to query products: " + error)
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    Json::Value products(Json::arrayValue);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        Json::Value product;
+
+        product["id"] = sqlite3_column_int(stmt, 0);
+        product["name"] = getTextColumn(stmt, 1);
+        product["category"] = getTextColumn(stmt, 2);
+        product["price"] = sqlite3_column_double(stmt, 3);
+        product["stock"] = sqlite3_column_int(stmt, 4);
+        product["enabled"] = sqlite3_column_int(stmt, 5) == 1;
+
+        products.append(product);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = products;
+
+    auto resp = HttpResponse::newHttpJsonResponse(result);
+    callback(resp);
+}
+
+void ProductController::updateEnabled(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    int productId)
+{
+    auto json = req->getJsonObject();
+
+    if (!json || !json->isMember("enabled") || !(*json)["enabled"].isBool()) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("invalid request body")
+        );
+        resp->setStatusCode(k400BadRequest);
+        callback(resp);
+        return;
+    }
+
+    bool enabled = (*json)["enabled"].asBool();
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to open database")
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    const char* sql =
+        "UPDATE products "
+        "SET enabled = ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to prepare enabled update: " + error)
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    sqlite3_bind_int(stmt, 1, enabled ? 1 : 0);
+    sqlite3_bind_int(stmt, 2, productId);
+
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to update enabled: " + error)
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    sqlite3_finalize(stmt);
+
+    int changedRows = sqlite3_changes(db);
+    sqlite3_close(db);
+
+    if (changedRows == 0) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("product not found")
+        );
+        resp->setStatusCode(k404NotFound);
+        callback(resp);
+        return;
+    }
+
+    Json::Value data;
+    data["id"] = productId;
+    data["enabled"] = enabled;
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = data;
+
+    auto resp = HttpResponse::newHttpJsonResponse(result);
+    callback(resp);
+}

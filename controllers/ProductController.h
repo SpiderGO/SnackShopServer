@@ -12,8 +12,17 @@ class ProductController : public HttpController<ProductController>
         ADD_METHOD_TO(
             ProductController::listProducts,
             "/api/products",
-            Get
-        );
+            Get);
+        
+        ADD_METHOD_TO(
+            ProductController::listAllProductsForMerchant,
+            "/api/merchant/products",
+            Get);
+        
+        ADD_METHOD_TO(
+            ProductController::updateEnabled,
+            "/api/products/{1}/enabled",
+            Patch);
 
         ADD_METHOD_TO(
             ProductController::createProduct,
@@ -39,4 +48,13 @@ class ProductController : public HttpController<ProductController>
         void createProduct(
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback);
+            
+        void listAllProductsForMerchant(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback);
+
+        void updateEnabled(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback,
+            int productId);   
 };
