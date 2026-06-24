@@ -15,10 +15,28 @@ class ProductController : public HttpController<ProductController>
             Get
         );
 
+        ADD_METHOD_TO(
+            ProductController::createProduct,
+            "/api/products",
+            Post);
+        
+        ADD_METHOD_TO(
+            ProductController::updateStock,
+            "/api/products/{1}/stock",
+            Patch);
+
         METHOD_LIST_END
 
         void listProducts(
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback);
-
+        
+        void updateStock(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback,
+            int productId);
+        
+        void createProduct(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback);
 };
