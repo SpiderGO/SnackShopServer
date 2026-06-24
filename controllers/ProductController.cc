@@ -485,3 +485,115 @@ void ProductController::updateEnabled(
     auto resp = HttpResponse::newHttpJsonResponse(result);
     callback(resp);
 }
+
+void ProductController::updateProduct(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    int productId)
+{
+    auto json = req->getJsonObject();
+
+    if (!json ||
+        !json->isMember("name") ||
+        !json->isMember("category") ||
+        !json->isMember("price")) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("invalid request body")
+        );
+        resp->setStatusCode(k400BadRequest);
+        callback(resp);
+        return;
+    }
+
+    std::string name = (*json)["name"].asString();
+    std::string category = (*json)["category"].asString();
+    double price = (*json)["price"].asDouble();
+
+    if (productId <= 0 || name.empty() || category.empty() || price < 0) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("invalid product fields")
+        );
+        resp->setStatusCode(k400BadRequest);
+        callback(resp);
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to open database")
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    const char* sql =
+        "UPDATE products "
+        "SET name = ?, category = ?, price = ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to prepare product update: " + error)
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 3, price);
+    sqlite3_bind_int(stmt, 4, productId);
+
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("failed to update product: " + error)
+        );
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+        return;
+    }
+
+    sqlite3_finalize(stmt);
+
+    int changedRows = sqlite3_changes(db);
+    sqlite3_close(db);
+
+    if (changedRows == 0) {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            makeErrorResponse("product not found")
+        );
+        resp->setStatusCode(k404NotFound);
+        callback(resp);
+        return;
+    }
+
+    Json::Value data;
+    data["id"] = productId;
+    data["name"] = name;
+    data["category"] = category;
+    data["price"] = price;
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = data;
+
+    auto resp = HttpResponse::newHttpJsonResponse(result);
+    callback(resp);
+}

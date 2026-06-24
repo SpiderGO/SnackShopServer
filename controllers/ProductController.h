@@ -33,6 +33,11 @@ class ProductController : public HttpController<ProductController>
             ProductController::updateStock,
             "/api/products/{1}/stock",
             Patch);
+        
+        ADD_METHOD_TO(
+            ProductController::updateProduct,
+            "/api/products/{1}",
+            Patch);
 
         METHOD_LIST_END
 
@@ -48,7 +53,7 @@ class ProductController : public HttpController<ProductController>
         void createProduct(
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback);
-            
+
         void listAllProductsForMerchant(
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback);
@@ -57,4 +62,9 @@ class ProductController : public HttpController<ProductController>
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback,
             int productId);   
+        
+        void updateProduct(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback,
+            int productId);
 };
