@@ -78,6 +78,17 @@ std::string generateToken() {
     return oss.str();
 }
 
+std::string getBearerToken(const HttpRequestPtr& req) {
+    std::string auth = req->getHeader("Authorization");
+    const std::string prefix = "Bearer ";
+
+    if (auth.rfind(prefix, 0) != 0) {
+        return "";
+    }
+
+    return auth.substr(prefix.size());
+}
+
 }
 
 void MerchantAuthController::login(
@@ -244,6 +255,75 @@ void MerchantAuthController::login(
     result["code"] = 0;
     result["message"] = "success";
     result["data"] = data;
+
+    callback(makeJsonResponse(result));
+}
+
+void MerchantAuthController::logout(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback)
+{
+    std::string token = getBearerToken(req);
+
+    if (token.empty()) {
+        callback(makeJsonResponse(
+            makeResponseBody(1, "unauthorized"),
+            k401Unauthorized
+        ));
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to open database"),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* sql =
+        "UPDATE merchant_sessions "
+        "SET enabled = 0 "
+        "WHERE token = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to prepare logout: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        std::string error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeResponseBody(1, "failed to logout: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_close(db);
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = Json::objectValue;
 
     callback(makeJsonResponse(result));
 }

@@ -14,9 +14,18 @@ public:
         "/api/merchant/login",
         Post);
 
+    ADD_METHOD_TO(
+        MerchantAuthController::logout,
+        "/api/merchant/logout",
+        Post);
+
     METHOD_LIST_END
 
     void login(
+        const HttpRequestPtr& req,
+        std::function<void(const HttpResponsePtr&)>&& callback);
+        
+    void logout(
         const HttpRequestPtr& req,
         std::function<void(const HttpResponsePtr&)>&& callback);
 };
