@@ -110,6 +110,52 @@ HttpResponsePtr makeUnauthorizedResponse() {
     return resp;
 }
 
+Json::Value queryProductVariants(sqlite3* db, int productId, bool onlyEnabled) {
+    Json::Value variants(Json::arrayValue);
+
+    const char* sqlAll =
+        "SELECT id, variant_name, price, stock, image_url, enabled "
+        "FROM product_variants "
+        "WHERE product_id = ? "
+        "ORDER BY id ASC;";
+
+    const char* sqlEnabled =
+        "SELECT id, variant_name, price, stock, image_url, enabled "
+        "FROM product_variants "
+        "WHERE product_id = ? AND enabled = 1 "
+        "ORDER BY id ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        db,
+        onlyEnabled ? sqlEnabled : sqlAll,
+        -1,
+        &stmt,
+        nullptr
+    );
+
+    if (rc != SQLITE_OK) {
+        return variants;
+    }
+
+    sqlite3_bind_int(stmt, 1, productId);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Json::Value variant;
+
+        variant["id"] = sqlite3_column_int(stmt, 0);
+        variant["variantName"] = getTextColumn(stmt, 1);
+        variant["price"] = sqlite3_column_double(stmt, 2);
+        variant["stock"] = sqlite3_column_int(stmt, 3);
+        variant["imageUrl"] = getTextColumn(stmt, 4);
+        variant["enabled"] = sqlite3_column_int(stmt, 5) == 1;
+
+        variants.append(variant);
+    }
+
+    sqlite3_finalize(stmt);
+    return variants;
+}
 }
 
 void ProductController::listProducts(
@@ -130,10 +176,20 @@ void ProductController::listProducts(
     }
 
     const char* sql =
-        "SELECT id, name, category, price, stock, enabled "
-        "FROM products "
-        "WHERE enabled = 1 "
-        "ORDER BY id ASC;";
+            "SELECT "
+            "p.id, "
+            "p.name, "
+            "p.category, "
+            "p.main_image_url, "
+            "p.enabled, "
+            "COALESCE(MIN(v.price), p.price) AS display_price, "
+            "COALESCE(SUM(v.stock), p.stock) AS total_stock "
+            "FROM products p "
+            "LEFT JOIN product_variants v "
+            "ON p.id = v.product_id AND v.enabled = 1 "
+            "WHERE p.enabled = 1 "
+            "GROUP BY p.id "
+            "ORDER BY p.id ASC;";
 
     sqlite3_stmt* stmt = nullptr;
 
@@ -157,12 +213,17 @@ void ProductController::listProducts(
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         Json::Value product;
 
-        product["id"] = sqlite3_column_int(stmt, 0);
+        int productId = sqlite3_column_int(stmt, 0);
+
+        product["id"] = productId;
         product["name"] = getTextColumn(stmt, 1);
         product["category"] = getTextColumn(stmt, 2);
-        product["price"] = sqlite3_column_double(stmt, 3);
-        product["stock"] = sqlite3_column_int(stmt, 4);
-        product["enabled"] = sqlite3_column_int(stmt, 5) == 1;
+        product["mainImageUrl"] = getTextColumn(stmt, 3);
+        product["imageUrl"] = getTextColumn(stmt, 3);
+        product["enabled"] = sqlite3_column_int(stmt, 4) == 1;
+        product["price"] = sqlite3_column_double(stmt, 5);
+        product["stock"] = sqlite3_column_int(stmt, 6);
+        product["variants"] = queryProductVariants(db, productId, true);
 
         products.append(product);
     }
@@ -420,9 +481,19 @@ void ProductController::listAllProductsForMerchant(
     }
 
     const char* sql =
-        "SELECT id, name, category, price, stock, enabled "
-        "FROM products "
-        "ORDER BY id ASC;";
+        "SELECT "
+        "p.id, "
+        "p.name, "
+        "p.category, "
+        "p.main_image_url, "
+        "p.enabled, "
+        "COALESCE(MIN(v.price), p.price) AS display_price, "
+        "COALESCE(SUM(v.stock), p.stock) AS total_stock "
+        "FROM products p "
+        "LEFT JOIN product_variants v "
+        "ON p.id = v.product_id "
+        "GROUP BY p.id "
+        "ORDER BY p.id ASC;";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -444,12 +515,17 @@ void ProductController::listAllProductsForMerchant(
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         Json::Value product;
 
-        product["id"] = sqlite3_column_int(stmt, 0);
+        int productId = sqlite3_column_int(stmt, 0);
+
+        product["id"] = productId;
         product["name"] = getTextColumn(stmt, 1);
         product["category"] = getTextColumn(stmt, 2);
-        product["price"] = sqlite3_column_double(stmt, 3);
-        product["stock"] = sqlite3_column_int(stmt, 4);
-        product["enabled"] = sqlite3_column_int(stmt, 5) == 1;
+        product["mainImageUrl"] = getTextColumn(stmt, 3);
+        product["imageUrl"] = getTextColumn(stmt, 3);
+        product["enabled"] = sqlite3_column_int(stmt, 4) == 1;
+        product["price"] = sqlite3_column_double(stmt, 5);
+        product["stock"] = sqlite3_column_int(stmt, 6);
+        product["variants"] = queryProductVariants(db, productId, false);
 
         products.append(product);
     }

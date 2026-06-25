@@ -6,6 +6,7 @@ CREATE TABLE products(
     category TEXT NOT NULL,
     price REAL NOT NULL,
     stock INTEGER NOT NULL,
+    main_image_url TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1
 );
 

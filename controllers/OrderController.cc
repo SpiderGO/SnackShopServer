@@ -7,9 +7,11 @@
 
 namespace {
 
-struct ProductSnapshot {
+struct OrderItemSnapshot {
     int productId;
-    std::string name;
+    int variantId;
+    std::string productName;
+    std::string variantName;
     double price;
     int stock;
     int quantity;
@@ -50,7 +52,10 @@ Json::Value makeErrorResponse(const std::string& message) {
     return result;
 }
 
-HttpResponsePtr makeJsonResponse(const Json::Value& body, HttpStatusCode statusCode = k200OK) {
+HttpResponsePtr makeJsonResponse(
+    const Json::Value& body,
+    HttpStatusCode statusCode = k200OK
+) {
     auto resp = HttpResponse::newHttpJsonResponse(body);
     resp->setStatusCode(statusCode);
     return resp;
@@ -142,7 +147,7 @@ HttpResponsePtr makeUnauthorizedResponse() {
     return resp;
 }
 
-}
+}  // namespace
 
 void OrderController::createOrder(
     const HttpRequestPtr& req,
@@ -186,6 +191,46 @@ void OrderController::createOrder(
         return;
     }
 
+    if (!json->isMember("customerName") || !(*json)["customerName"].isString()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerName is required"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (!json->isMember("customerPhone") || !(*json)["customerPhone"].isString()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerPhone is required"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string customerName = (*json)["customerName"].asString();
+    std::string customerPhone = (*json)["customerPhone"].asString();
+
+    if (customerName.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerName cannot be empty"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (customerPhone.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerPhone cannot be empty"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string remark = "";
+    if (json->isMember("remark") && (*json)["remark"].isString()) {
+        remark = (*json)["remark"].asString();
+    }
+
     std::string pickupType = "到店自提";
     if (json->isMember("pickupType") && (*json)["pickupType"].isString()) {
         pickupType = (*json)["pickupType"].asString();
@@ -211,13 +256,22 @@ void OrderController::createOrder(
         return;
     }
 
-    const char* queryProductSql =
-        "SELECT name, price, stock "
-        "FROM products "
-        "WHERE id = ? AND enabled = 1;";
+    const char* queryVariantSql =
+        "SELECT "
+        "v.id, "
+        "v.product_id, "
+        "p.name, "
+        "v.variant_name, "
+        "v.price, "
+        "v.stock "
+        "FROM product_variants v "
+        "JOIN products p ON p.id = v.product_id "
+        "WHERE v.id = ? "
+        "AND v.enabled = 1 "
+        "AND p.enabled = 1;";
 
     sqlite3_stmt* queryStmt = nullptr;
-    int rc = sqlite3_prepare_v2(db, queryProductSql, -1, &queryStmt, nullptr);
+    int rc = sqlite3_prepare_v2(db, queryVariantSql, -1, &queryStmt, nullptr);
 
     if (rc != SQLITE_OK) {
         execSql(db, "ROLLBACK;", error);
@@ -225,33 +279,31 @@ void OrderController::createOrder(
         sqlite3_close(db);
 
         callback(makeJsonResponse(
-            makeErrorResponse("failed to prepare product query: " + dbError),
+            makeErrorResponse("failed to prepare variant query: " + dbError),
             k500InternalServerError
         ));
         return;
     }
 
-    std::vector<ProductSnapshot> snapshots;
+    std::vector<OrderItemSnapshot> snapshots;
     double totalAmount = 0.0;
 
     for (const auto& item : items) {
-        int productId = 0;
+        int variantId = 0;
 
-        if (item.isMember("productId")) {
-            productId = item["productId"].asInt();
-        } else if (item.isMember("id")) {
-            productId = item["id"].asInt();
+        if (item.isMember("variantId")) {
+            variantId = item["variantId"].asInt();
         }
 
         int quantity = item.isMember("quantity") ? item["quantity"].asInt() : 0;
 
-        if (productId <= 0 || quantity <= 0) {
+        if (variantId <= 0 || quantity <= 0) {
             sqlite3_finalize(queryStmt);
             execSql(db, "ROLLBACK;", error);
             sqlite3_close(db);
 
             callback(makeJsonResponse(
-                makeErrorResponse("invalid product id or quantity"),
+                makeErrorResponse("invalid variant id or quantity"),
                 k400BadRequest
             ));
             return;
@@ -259,7 +311,7 @@ void OrderController::createOrder(
 
         sqlite3_reset(queryStmt);
         sqlite3_clear_bindings(queryStmt);
-        sqlite3_bind_int(queryStmt, 1, productId);
+        sqlite3_bind_int(queryStmt, 1, variantId);
 
         rc = sqlite3_step(queryStmt);
 
@@ -269,15 +321,18 @@ void OrderController::createOrder(
             sqlite3_close(db);
 
             callback(makeJsonResponse(
-                makeErrorResponse("product not found or disabled"),
+                makeErrorResponse("variant not found or disabled"),
                 k400BadRequest
             ));
             return;
         }
 
-        std::string name = getTextColumn(queryStmt, 0);
-        double price = sqlite3_column_double(queryStmt, 1);
-        int stock = sqlite3_column_int(queryStmt, 2);
+        int realVariantId = sqlite3_column_int(queryStmt, 0);
+        int productId = sqlite3_column_int(queryStmt, 1);
+        std::string productName = getTextColumn(queryStmt, 2);
+        std::string variantName = getTextColumn(queryStmt, 3);
+        double price = sqlite3_column_double(queryStmt, 4);
+        int stock = sqlite3_column_int(queryStmt, 5);
 
         if (quantity > stock) {
             sqlite3_finalize(queryStmt);
@@ -285,15 +340,20 @@ void OrderController::createOrder(
             sqlite3_close(db);
 
             callback(makeJsonResponse(
-                makeErrorResponse("insufficient stock for product: " + name),
+                makeErrorResponse(
+                    "insufficient stock for product: " +
+                    productName + " " + variantName
+                ),
                 k400BadRequest
             ));
             return;
         }
 
-        snapshots.push_back(ProductSnapshot{
+        snapshots.push_back(OrderItemSnapshot{
             productId,
-            name,
+            realVariantId,
+            productName,
+            variantName,
             price,
             stock,
             quantity
@@ -305,8 +365,9 @@ void OrderController::createOrder(
     sqlite3_finalize(queryStmt);
 
     const char* insertOrderSql =
-        "INSERT INTO orders (customer_id, total_amount, status, pickup_type, created_at) "
-        "VALUES (?, ?, '待商家确认', ?, datetime('now', 'localtime'));";
+        "INSERT INTO orders "
+        "(customer_id, customer_name, customer_phone, remark, total_amount, status, pickup_type, created_at) "
+        "VALUES (?, ?, ?, ?, ?, '待商家确认', ?, datetime('now', 'localtime'));";
 
     sqlite3_stmt* insertOrderStmt = nullptr;
     rc = sqlite3_prepare_v2(db, insertOrderSql, -1, &insertOrderStmt, nullptr);
@@ -324,8 +385,11 @@ void OrderController::createOrder(
     }
 
     sqlite3_bind_text(insertOrderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(insertOrderStmt, 2, totalAmount);
-    sqlite3_bind_text(insertOrderStmt, 3, pickupType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insertOrderStmt, 2, customerName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insertOrderStmt, 3, customerPhone.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insertOrderStmt, 4, remark.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(insertOrderStmt, 5, totalAmount);
+    sqlite3_bind_text(insertOrderStmt, 6, pickupType.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(insertOrderStmt);
 
@@ -348,13 +412,13 @@ void OrderController::createOrder(
 
     const char* insertItemSql =
         "INSERT INTO order_items "
-        "(order_id, product_id, product_name, price, quantity) "
-        "VALUES (?, ?, ?, ?, ?);";
+        "(order_id, product_id, variant_id, product_name, variant_name, price, quantity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);";
 
     const char* updateStockSql =
-        "UPDATE products "
+        "UPDATE product_variants "
         "SET stock = stock - ? "
-        "WHERE id = ?;";
+        "WHERE id = ? AND stock >= ?;";
 
     sqlite3_stmt* insertItemStmt = nullptr;
     sqlite3_stmt* updateStockStmt = nullptr;
@@ -380,7 +444,7 @@ void OrderController::createOrder(
         sqlite3_close(db);
 
         callback(makeJsonResponse(
-            makeErrorResponse("failed to prepare stock update: " + dbError),
+            makeErrorResponse("failed to prepare variant stock update: " + dbError),
             k500InternalServerError
         ));
         return;
@@ -392,9 +456,11 @@ void OrderController::createOrder(
 
         sqlite3_bind_int64(insertItemStmt, 1, orderId);
         sqlite3_bind_int(insertItemStmt, 2, product.productId);
-        sqlite3_bind_text(insertItemStmt, 3, product.name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(insertItemStmt, 4, product.price);
-        sqlite3_bind_int(insertItemStmt, 5, product.quantity);
+        sqlite3_bind_int(insertItemStmt, 3, product.variantId);
+        sqlite3_bind_text(insertItemStmt, 4, product.productName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(insertItemStmt, 5, product.variantName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(insertItemStmt, 6, product.price);
+        sqlite3_bind_int(insertItemStmt, 7, product.quantity);
 
         rc = sqlite3_step(insertItemStmt);
 
@@ -416,19 +482,19 @@ void OrderController::createOrder(
         sqlite3_clear_bindings(updateStockStmt);
 
         sqlite3_bind_int(updateStockStmt, 1, product.quantity);
-        sqlite3_bind_int(updateStockStmt, 2, product.productId);
+        sqlite3_bind_int(updateStockStmt, 2, product.variantId);
+        sqlite3_bind_int(updateStockStmt, 3, product.quantity);
 
         rc = sqlite3_step(updateStockStmt);
 
-        if (rc != SQLITE_DONE) {
+        if (rc != SQLITE_DONE || sqlite3_changes(db) == 0) {
             sqlite3_finalize(insertItemStmt);
             sqlite3_finalize(updateStockStmt);
             execSql(db, "ROLLBACK;", error);
-            std::string dbError = sqlite3_errmsg(db);
             sqlite3_close(db);
 
             callback(makeJsonResponse(
-                makeErrorResponse("failed to update stock: " + dbError),
+                makeErrorResponse("failed to update variant stock"),
                 k500InternalServerError
             ));
             return;
@@ -453,6 +519,9 @@ void OrderController::createOrder(
 
     Json::Value data;
     data["id"] = static_cast<Json::Int64>(orderId);
+    data["customerName"] = customerName;
+    data["customerPhone"] = customerPhone;
+    data["remark"] = remark;
     data["totalAmount"] = totalAmount;
     data["status"] = "待商家确认";
     data["pickupType"] = pickupType;
@@ -479,8 +548,6 @@ void OrderController::listOrders(
         return;
     }
 
-    (void)req;
-
     sqlite3* db = nullptr;
 
     if (!openDatabase(&db)) {
@@ -492,7 +559,7 @@ void OrderController::listOrders(
     }
 
     const char* orderSql =
-        "SELECT id, total_amount, status, pickup_type, created_at "
+        "SELECT id, customer_name, customer_phone, remark, total_amount, status, pickup_type, created_at "
         "FROM orders "
         "WHERE customer_id = ? "
         "ORDER BY id DESC;";
@@ -511,10 +578,10 @@ void OrderController::listOrders(
         return;
     }
 
-    Json::Value orders(Json::arrayValue);
+    sqlite3_bind_text(orderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
 
     const char* itemSql =
-        "SELECT product_id, product_name, price, quantity "
+        "SELECT product_id, product_name, variant_id, variant_name, price, quantity "
         "FROM order_items "
         "WHERE order_id = ? "
         "ORDER BY id ASC;";
@@ -534,17 +601,20 @@ void OrderController::listOrders(
         return;
     }
 
-    sqlite3_bind_text(orderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
+    Json::Value orders(Json::arrayValue);
 
     while ((rc = sqlite3_step(orderStmt)) == SQLITE_ROW) {
         long long orderId = sqlite3_column_int64(orderStmt, 0);
 
         Json::Value order;
         order["id"] = static_cast<Json::Int64>(orderId);
-        order["totalAmount"] = sqlite3_column_double(orderStmt, 1);
-        order["status"] = getTextColumn(orderStmt, 2);
-        order["pickupType"] = getTextColumn(orderStmt, 3);
-        order["createdAt"] = getTextColumn(orderStmt, 4);
+        order["customerName"] = getTextColumn(orderStmt, 1);
+        order["customerPhone"] = getTextColumn(orderStmt, 2);
+        order["remark"] = getTextColumn(orderStmt, 3);
+        order["totalAmount"] = sqlite3_column_double(orderStmt, 4);
+        order["status"] = getTextColumn(orderStmt, 5);
+        order["pickupType"] = getTextColumn(orderStmt, 6);
+        order["createdAt"] = getTextColumn(orderStmt, 7);
 
         Json::Value orderItems(Json::arrayValue);
 
@@ -555,15 +625,17 @@ void OrderController::listOrders(
         while (sqlite3_step(itemStmt) == SQLITE_ROW) {
             Json::Value product;
             product["id"] = sqlite3_column_int(itemStmt, 0);
+            product["productId"] = sqlite3_column_int(itemStmt, 0);
             product["name"] = getTextColumn(itemStmt, 1);
-            product["price"] = sqlite3_column_double(itemStmt, 2);
-            product["quantity"] = sqlite3_column_int(itemStmt, 3);
+            product["variantId"] = sqlite3_column_int(itemStmt, 2);
+            product["variantName"] = getTextColumn(itemStmt, 3);
+            product["price"] = sqlite3_column_double(itemStmt, 4);
+            product["quantity"] = sqlite3_column_int(itemStmt, 5);
 
             orderItems.append(product);
         }
 
         order["items"] = orderItems;
-
         orders.append(order);
     }
 
@@ -702,7 +774,7 @@ void OrderController::listMerchantOrders(
     }
 
     const char* orderSql =
-        "SELECT id, total_amount, status, pickup_type, created_at "
+        "SELECT id, customer_name, customer_phone, remark, total_amount, status, pickup_type, created_at "
         "FROM orders "
         "ORDER BY id DESC;";
 
@@ -721,7 +793,7 @@ void OrderController::listMerchantOrders(
     }
 
     const char* itemSql =
-        "SELECT product_id, product_name, price, quantity "
+        "SELECT product_id, product_name, variant_id, variant_name, price, quantity "
         "FROM order_items "
         "WHERE order_id = ? "
         "ORDER BY id ASC;";
@@ -748,10 +820,13 @@ void OrderController::listMerchantOrders(
 
         Json::Value order;
         order["id"] = static_cast<Json::Int64>(orderId);
-        order["totalAmount"] = sqlite3_column_double(orderStmt, 1);
-        order["status"] = getTextColumn(orderStmt, 2);
-        order["pickupType"] = getTextColumn(orderStmt, 3);
-        order["createdAt"] = getTextColumn(orderStmt, 4);
+        order["customerName"] = getTextColumn(orderStmt, 1);
+        order["customerPhone"] = getTextColumn(orderStmt, 2);
+        order["remark"] = getTextColumn(orderStmt, 3);
+        order["totalAmount"] = sqlite3_column_double(orderStmt, 4);
+        order["status"] = getTextColumn(orderStmt, 5);
+        order["pickupType"] = getTextColumn(orderStmt, 6);
+        order["createdAt"] = getTextColumn(orderStmt, 7);
 
         Json::Value orderItems(Json::arrayValue);
 
@@ -762,9 +837,12 @@ void OrderController::listMerchantOrders(
         while (sqlite3_step(itemStmt) == SQLITE_ROW) {
             Json::Value product;
             product["id"] = sqlite3_column_int(itemStmt, 0);
+            product["productId"] = sqlite3_column_int(itemStmt, 0);
             product["name"] = getTextColumn(itemStmt, 1);
-            product["price"] = sqlite3_column_double(itemStmt, 2);
-            product["quantity"] = sqlite3_column_int(itemStmt, 3);
+            product["variantId"] = sqlite3_column_int(itemStmt, 2);
+            product["variantName"] = getTextColumn(itemStmt, 3);
+            product["price"] = sqlite3_column_double(itemStmt, 4);
+            product["quantity"] = sqlite3_column_int(itemStmt, 5);
 
             orderItems.append(product);
         }
