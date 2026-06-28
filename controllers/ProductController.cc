@@ -38,8 +38,17 @@ Json::Value makeErrorResponse(const std::string& message) {
     Json::Value result;
     result["code"] = 1;
     result["message"] = message;
-    result["data"] = Json::arrayValue;
+    result["data"] = Json::objectValue;
     return result;
+}
+
+HttpResponsePtr makeJsonResponse(
+    const Json::Value& body,
+    HttpStatusCode statusCode = k200OK
+) {
+    auto resp = HttpResponse::newHttpJsonResponse(body);
+    resp->setStatusCode(statusCode);
+    return resp;
 }
 
 std::string getTextColumn(sqlite3_stmt* stmt, int index) {
@@ -756,4 +765,176 @@ void ProductController::updateProduct(
 
     auto resp = HttpResponse::newHttpJsonResponse(result);
     callback(resp);
+}
+
+void ProductController::createVariant(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    int productId)
+{
+    if (!isMerchantAuthorized(req)) {
+        callback(makeUnauthorizedResponse());
+        return;
+    }
+
+    if (productId <= 0) {
+        callback(makeJsonResponse(
+            makeErrorResponse("invalid product id"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    auto json = req->getJsonObject();
+
+    if (!json ||
+        !json->isMember("variantName") ||
+        !json->isMember("price") ||
+        !json->isMember("stock")) {
+        callback(makeJsonResponse(
+            makeErrorResponse("invalid request body"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string variantName = (*json)["variantName"].asString();
+    double price = (*json)["price"].asDouble();
+    int stock = (*json)["stock"].asInt();
+
+    std::string imageUrl = "";
+    if (json->isMember("imageUrl") && (*json)["imageUrl"].isString()) {
+        imageUrl = (*json)["imageUrl"].asString();
+    }
+
+    if (variantName.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("variantName cannot be empty"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (price < 0) {
+        callback(makeJsonResponse(
+            makeErrorResponse("price cannot be negative"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (stock < 0) {
+        callback(makeJsonResponse(
+            makeErrorResponse("stock cannot be negative"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to open database"),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* checkProductSql =
+        "SELECT id "
+        "FROM products "
+        "WHERE id = ? "
+        "LIMIT 1;";
+
+    sqlite3_stmt* checkStmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, checkProductSql, -1, &checkStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare product check: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(checkStmt, 1, productId);
+
+    rc = sqlite3_step(checkStmt);
+
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(checkStmt);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("product not found"),
+            k404NotFound
+        ));
+        return;
+    }
+
+    sqlite3_finalize(checkStmt);
+
+    const char* insertSql =
+        "INSERT INTO product_variants "
+        "(product_id, variant_name, price, stock, image_url, enabled) "
+        "VALUES (?, ?, ?, ?, ?, 1);";
+
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, insertSql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare variant insert: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(stmt, 1, productId);
+    sqlite3_bind_text(stmt, 2, variantName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 3, price);
+    sqlite3_bind_int(stmt, 4, stock);
+    sqlite3_bind_text(stmt, 5, imageUrl.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to create variant: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    long long variantId = sqlite3_last_insert_rowid(db);
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    Json::Value data;
+    data["id"] = static_cast<Json::Int64>(variantId);
+    data["productId"] = productId;
+    data["variantName"] = variantName;
+    data["price"] = price;
+    data["stock"] = stock;
+    data["imageUrl"] = imageUrl;
+    data["enabled"] = true;
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = data;
+
+    callback(makeJsonResponse(result));
 }
