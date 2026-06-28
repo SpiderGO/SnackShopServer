@@ -43,6 +43,16 @@ class ProductController : public HttpController<ProductController>
             ProductController::createVariant,
             "/api/products/{1}/variants",
             Post);
+        
+        ADD_METHOD_TO(
+            ProductController::updateVariant,
+            "/api/product-variants/{1}",
+            Patch);
+
+        ADD_METHOD_TO(
+            ProductController::updateVariantEnabled,
+            "/api/product-variants/{1}/enabled",
+            Patch);
 
         METHOD_LIST_END
 
@@ -77,4 +87,14 @@ class ProductController : public HttpController<ProductController>
             const HttpRequestPtr& req,
             std::function<void(const HttpResponsePtr&)>&& callback,
             int productId);
+        
+        void updateVariant(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback,
+            int variantId);
+
+        void updateVariantEnabled(
+            const HttpRequestPtr& req,
+            std::function<void(const HttpResponsePtr&)>&& callback,
+            int variantId);
 };
