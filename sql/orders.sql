@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS order_items (
     variant_id INTEGER NOT NULL DEFAULT 0,
     product_name TEXT NOT NULL,
     variant_name TEXT NOT NULL DEFAULT '',
+    image_url TEXT NOT NULL DEFAULT '',
+    unit TEXT NOT NULL DEFAULT '件',
     price REAL NOT NULL,
     quantity INTEGER NOT NULL,
     FOREIGN KEY (order_id) REFERENCES orders(id),

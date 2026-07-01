@@ -123,13 +123,13 @@ Json::Value queryProductVariants(sqlite3* db, int productId, bool onlyEnabled) {
     Json::Value variants(Json::arrayValue);
 
     const char* sqlAll =
-        "SELECT id, variant_name, price, stock, image_url, enabled "
+        "SELECT id, variant_name, price, stock, unit, image_url, enabled "
         "FROM product_variants "
         "WHERE product_id = ? "
         "ORDER BY id ASC;";
 
     const char* sqlEnabled =
-        "SELECT id, variant_name, price, stock, image_url, enabled "
+        "SELECT id, variant_name, price, stock, unit, image_url, enabled "
         "FROM product_variants "
         "WHERE product_id = ? AND enabled = 1 "
         "ORDER BY id ASC;";
@@ -156,8 +156,15 @@ Json::Value queryProductVariants(sqlite3* db, int productId, bool onlyEnabled) {
         variant["variantName"] = getTextColumn(stmt, 1);
         variant["price"] = sqlite3_column_double(stmt, 2);
         variant["stock"] = sqlite3_column_int(stmt, 3);
-        variant["imageUrl"] = getTextColumn(stmt, 4);
-        variant["enabled"] = sqlite3_column_int(stmt, 5) == 1;
+
+        std::string unit = getTextColumn(stmt, 4);
+        if (unit.empty()) {
+            unit = "件";
+        }
+
+        variant["unit"] = unit;
+        variant["imageUrl"] = getTextColumn(stmt, 5);
+        variant["enabled"] = sqlite3_column_int(stmt, 6) == 1;
 
         variants.append(variant);
     }
@@ -165,6 +172,8 @@ Json::Value queryProductVariants(sqlite3* db, int productId, bool onlyEnabled) {
     sqlite3_finalize(stmt);
     return variants;
 }
+
+
 }
 
 void ProductController::listProducts(
@@ -810,6 +819,15 @@ void ProductController::createVariant(
     double price = (*json)["price"].asDouble();
     int stock = (*json)["stock"].asInt();
 
+    std::string unit = "件";
+    if (json->isMember("unit") && (*json)["unit"].isString()) {
+        unit = (*json)["unit"].asString();
+    }
+
+    if (unit.empty()) {
+        unit = "件";
+    }
+
     std::string imageUrl = "";
     if (json->isMember("imageUrl") && (*json)["imageUrl"].isString()) {
         imageUrl = (*json)["imageUrl"].asString();
@@ -888,8 +906,8 @@ void ProductController::createVariant(
 
     const char* insertSql =
         "INSERT INTO product_variants "
-        "(product_id, variant_name, price, stock, image_url, enabled) "
-        "VALUES (?, ?, ?, ?, ?, 1);";
+        "(product_id, variant_name, price, stock, unit, image_url, enabled) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1);";
 
     sqlite3_stmt* stmt = nullptr;
     rc = sqlite3_prepare_v2(db, insertSql, -1, &stmt, nullptr);
@@ -909,7 +927,8 @@ void ProductController::createVariant(
     sqlite3_bind_text(stmt, 2, variantName.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_double(stmt, 3, price);
     sqlite3_bind_int(stmt, 4, stock);
-    sqlite3_bind_text(stmt, 5, imageUrl.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, unit.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, imageUrl.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
 
@@ -936,6 +955,7 @@ void ProductController::createVariant(
     data["variantName"] = variantName;
     data["price"] = price;
     data["stock"] = stock;
+    data["unit"] = unit;
     data["imageUrl"] = imageUrl;
     data["enabled"] = true;
 
@@ -982,6 +1002,15 @@ void ProductController::updateVariant(
     double price = (*json)["price"].asDouble();
     int stock = (*json)["stock"].asInt();
 
+    std::string unit = "件";
+    if (json->isMember("unit") && (*json)["unit"].isString()) {
+        unit = (*json)["unit"].asString();
+    }
+
+    if (unit.empty()) {
+        unit = "件";
+    }
+
     std::string imageUrl = "";
     if (json->isMember("imageUrl") && (*json)["imageUrl"].isString()) {
         imageUrl = (*json)["imageUrl"].asString();
@@ -1023,7 +1052,7 @@ void ProductController::updateVariant(
 
     const char* sql =
         "UPDATE product_variants "
-        "SET variant_name = ?, price = ?, stock = ?, image_url = ? "
+        "SET variant_name = ?, price = ?, stock = ?, unit = ?, image_url = ? "
         "WHERE id = ?;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -1043,8 +1072,9 @@ void ProductController::updateVariant(
     sqlite3_bind_text(stmt, 1, variantName.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_double(stmt, 2, price);
     sqlite3_bind_int(stmt, 3, stock);
-    sqlite3_bind_text(stmt, 4, imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 5, variantId);
+    sqlite3_bind_text(stmt, 4, unit.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, imageUrl.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, variantId);
 
     rc = sqlite3_step(stmt);
 
@@ -1078,6 +1108,7 @@ void ProductController::updateVariant(
     data["variantName"] = variantName;
     data["price"] = price;
     data["stock"] = stock;
+    data["unit"] = unit;
     data["imageUrl"] = imageUrl;
 
     Json::Value result;
