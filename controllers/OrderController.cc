@@ -13,6 +13,7 @@ struct OrderItemSnapshot {
     std::string productName;
     std::string variantName;
     std::string imageUrl;
+    std::string unit;
     double price;
     int stock;
     int quantity;
@@ -259,7 +260,7 @@ void OrderController::createOrder(
 
     const char* queryVariantSql =
         "SELECT v.id, v.product_id, p.name, v.variant_name, "
-        "v.price, v.stock, v.image_url, p.main_image_url "
+        "v.price, v.stock, v.image_url, p.main_image_url, v.unit "
         "FROM product_variants v "
         "JOIN products p ON v.product_id = p.id "
         "WHERE v.id = ? AND v.enabled = 1 AND p.enabled = 1;";
@@ -335,6 +336,12 @@ void OrderController::createOrder(
             ? variantImageUrl
             : mainImageUrl;
 
+        std::string unit = getTextColumn(queryStmt, 8);
+
+        if (unit.empty()) {
+            unit = "件";
+        }
+        
         if (quantity > stock) {
             sqlite3_finalize(queryStmt);
             execSql(db, "ROLLBACK;", error);
@@ -356,6 +363,7 @@ void OrderController::createOrder(
             productName,
             variantName,
             imageUrl,
+            unit,
             price,
             stock,
             quantity
@@ -414,8 +422,8 @@ void OrderController::createOrder(
 
     const char* insertItemSql =
         "INSERT INTO order_items "
-        "(order_id, product_id, variant_id, product_name, variant_name, image_url, price, quantity) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+        "(order_id, product_id, variant_id, product_name, variant_name, image_url, unit, price, quantity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
     const char* updateStockSql =
         "UPDATE product_variants "
@@ -462,8 +470,9 @@ void OrderController::createOrder(
         sqlite3_bind_text(insertItemStmt, 4, product.productName.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insertItemStmt, 5, product.variantName.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insertItemStmt, 6, product.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(insertItemStmt, 7, product.price);
-        sqlite3_bind_int(insertItemStmt, 8, product.quantity);
+        sqlite3_bind_text(insertItemStmt, 7, product.unit.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(insertItemStmt, 8, product.price);
+        sqlite3_bind_int(insertItemStmt, 9, product.quantity);
 
         rc = sqlite3_step(insertItemStmt);
 
@@ -584,7 +593,7 @@ void OrderController::listOrders(
     sqlite3_bind_text(orderStmt, 1, customerId.c_str(), -1, SQLITE_TRANSIENT);
 
     const char* itemSql =
-        "SELECT product_id, product_name, variant_id, variant_name, image_url, price, quantity "
+        "SELECT product_id, product_name, variant_id, variant_name, image_url, unit, price, quantity "
         "FROM order_items "
         "WHERE order_id = ? "
         "ORDER BY id ASC;";
@@ -633,8 +642,15 @@ void OrderController::listOrders(
             product["variantId"] = sqlite3_column_int(itemStmt, 2);
             product["variantName"] = getTextColumn(itemStmt, 3);
             product["imageUrl"] = getTextColumn(itemStmt, 4);
-            product["price"] = sqlite3_column_double(itemStmt, 5);
-            product["quantity"] = sqlite3_column_int(itemStmt, 6);
+
+            std::string unit = getTextColumn(itemStmt, 5);
+            if (unit.empty()) {
+                unit = "件";
+            }
+
+            product["unit"] = unit;
+            product["price"] = sqlite3_column_double(itemStmt, 6);
+            product["quantity"] = sqlite3_column_int(itemStmt, 7);
 
             orderItems.append(product);
         }
@@ -797,7 +813,7 @@ void OrderController::listMerchantOrders(
     }
     
     const char* itemSql =
-        "SELECT product_id, product_name, variant_id, variant_name, image_url, price, quantity "
+        "SELECT product_id, product_name, variant_id, variant_name, image_url, unit, price, quantity "
         "FROM order_items "
         "WHERE order_id = ? "
         "ORDER BY id ASC;";
@@ -846,8 +862,15 @@ void OrderController::listMerchantOrders(
             product["variantId"] = sqlite3_column_int(itemStmt, 2);
             product["variantName"] = getTextColumn(itemStmt, 3);
             product["imageUrl"] = getTextColumn(itemStmt, 4);
-            product["price"] = sqlite3_column_double(itemStmt, 5);
-            product["quantity"] = sqlite3_column_int(itemStmt, 6);
+
+            std::string unit = getTextColumn(itemStmt, 5);
+            if (unit.empty()) {
+                unit = "件";
+            }
+
+            product["unit"] = unit;
+            product["price"] = sqlite3_column_double(itemStmt, 6);
+            product["quantity"] = sqlite3_column_int(itemStmt, 7);
 
             orderItems.append(product);
         }
