@@ -20,6 +20,11 @@ public:
         Patch);
 
     ADD_METHOD_TO(
+        OrderController::cancelOrder,
+        "/api/orders/{1}/cancel",
+        Patch);
+        
+    ADD_METHOD_TO(
         OrderController::createOrder,
         "/api/orders",
         Post);
@@ -47,4 +52,9 @@ public:
     void listMerchantOrders(
         const HttpRequestPtr& req,
         std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void cancelOrder(
+        const HttpRequestPtr& req,
+        std::function<void(const HttpResponsePtr&)>&& callback,
+        int orderId);
 };

@@ -151,6 +151,70 @@ HttpResponsePtr makeUnauthorizedResponse() {
 
 }  // namespace
 
+bool restoreOrderStock(sqlite3* db, int orderId, std::string& error)
+{
+    const char* querySql =
+        "SELECT variant_id, quantity "
+        "FROM order_items "
+        "WHERE order_id = ?;";
+
+    sqlite3_stmt* queryStmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, querySql, -1, &queryStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        return false;
+    }
+
+    const char* updateSql =
+        "UPDATE product_variants "
+        "SET stock = stock + ? "
+        "WHERE id = ?;";
+
+    sqlite3_stmt* updateStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        sqlite3_finalize(queryStmt);
+        return false;
+    }
+
+    sqlite3_bind_int(queryStmt, 1, orderId);
+
+    while ((rc = sqlite3_step(queryStmt)) == SQLITE_ROW) {
+        int variantId = sqlite3_column_int(queryStmt, 0);
+        int quantity = sqlite3_column_int(queryStmt, 1);
+
+        sqlite3_reset(updateStmt);
+        sqlite3_clear_bindings(updateStmt);
+
+        sqlite3_bind_int(updateStmt, 1, quantity);
+        sqlite3_bind_int(updateStmt, 2, variantId);
+
+        int updateRc = sqlite3_step(updateStmt);
+
+        if (updateRc != SQLITE_DONE) {
+            error = sqlite3_errmsg(db);
+            sqlite3_finalize(updateStmt);
+            sqlite3_finalize(queryStmt);
+            return false;
+        }
+    }
+
+    if (rc != SQLITE_DONE) {
+        error = sqlite3_errmsg(db);
+        sqlite3_finalize(updateStmt);
+        sqlite3_finalize(queryStmt);
+        return false;
+    }
+
+    sqlite3_finalize(updateStmt);
+    sqlite3_finalize(queryStmt);
+
+    return true;
+}
+
 void OrderController::createOrder(
     const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback)
@@ -695,7 +759,9 @@ void OrderController::updateOrderStatus(
 
     if (status != "待商家确认" &&
         status != "已接单" &&
-        status != "已完成") {
+        status != "待自提" &&
+        status != "已完成" &&
+        status != "已取消") {
         callback(makeJsonResponse(
             makeErrorResponse("invalid order status"),
             k400BadRequest
@@ -713,15 +779,102 @@ void OrderController::updateOrderStatus(
         return;
     }
 
-    const char* sql =
+    std::string error;
+    if (!execSql(db, "BEGIN TRANSACTION;", error)) {
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to begin transaction: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* querySql =
+        "SELECT status "
+        "FROM orders "
+        "WHERE id = ? "
+        "LIMIT 1;";
+
+    sqlite3_stmt* queryStmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, querySql, -1, &queryStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        execSql(db, "ROLLBACK;", error);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare order query: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(queryStmt, 1, orderId);
+
+    rc = sqlite3_step(queryStmt);
+
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(queryStmt);
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("order not found"),
+            k404NotFound
+        ));
+        return;
+    }
+
+    std::string currentStatus = getTextColumn(queryStmt, 0);
+    sqlite3_finalize(queryStmt);
+
+    if (currentStatus == "已取消") {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("order has already been cancelled"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (currentStatus == "已完成" && status != "已完成") {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("completed order cannot be changed"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (status == "已取消") {
+        if (!restoreOrderStock(db, orderId, error)) {
+            execSql(db, "ROLLBACK;", error);
+            sqlite3_close(db);
+
+            callback(makeJsonResponse(
+                makeErrorResponse("failed to restore stock: " + error),
+                k500InternalServerError
+            ));
+            return;
+        }
+    }
+
+    const char* updateSql =
         "UPDATE orders "
         "SET status = ? "
         "WHERE id = ?;";
 
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    sqlite3_stmt* updateStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nullptr);
 
     if (rc != SQLITE_OK) {
+        execSql(db, "ROLLBACK;", error);
         std::string dbError = sqlite3_errmsg(db);
         sqlite3_close(db);
 
@@ -732,13 +885,14 @@ void OrderController::updateOrderStatus(
         return;
     }
 
-    sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, orderId);
+    sqlite3_bind_text(updateStmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(updateStmt, 2, orderId);
 
-    rc = sqlite3_step(stmt);
+    rc = sqlite3_step(updateStmt);
 
     if (rc != SQLITE_DONE) {
-        sqlite3_finalize(stmt);
+        sqlite3_finalize(updateStmt);
+        execSql(db, "ROLLBACK;", error);
         std::string dbError = sqlite3_errmsg(db);
         sqlite3_close(db);
 
@@ -749,12 +903,14 @@ void OrderController::updateOrderStatus(
         return;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_finalize(updateStmt);
 
     int changedRows = sqlite3_changes(db);
-    sqlite3_close(db);
 
     if (changedRows == 0) {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
         callback(makeJsonResponse(
             makeErrorResponse("order not found"),
             k404NotFound
@@ -762,9 +918,211 @@ void OrderController::updateOrderStatus(
         return;
     }
 
+    if (!execSql(db, "COMMIT;", error)) {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to commit status update: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_close(db);
+
     Json::Value data;
     data["id"] = orderId;
     data["status"] = status;
+
+    Json::Value result;
+    result["code"] = 0;
+    result["message"] = "success";
+    result["data"] = data;
+
+    callback(makeJsonResponse(result));
+}
+
+void OrderController::cancelOrder(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    int orderId)
+{
+    auto json = req->getJsonObject();
+
+    if (!json || !json->isMember("customerId") || !(*json)["customerId"].isString()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerId is required"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    std::string customerId = (*json)["customerId"].asString();
+
+    if (customerId.empty()) {
+        callback(makeJsonResponse(
+            makeErrorResponse("customerId cannot be empty"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    sqlite3* db = nullptr;
+
+    if (!openDatabase(&db)) {
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to open database"),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    std::string error;
+    if (!execSql(db, "BEGIN TRANSACTION;", error)) {
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to begin transaction: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* querySql =
+        "SELECT status "
+        "FROM orders "
+        "WHERE id = ? AND customer_id = ? "
+        "LIMIT 1;";
+
+    sqlite3_stmt* queryStmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, querySql, -1, &queryStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        execSql(db, "ROLLBACK;", error);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare cancel order query: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(queryStmt, 1, orderId);
+    sqlite3_bind_text(queryStmt, 2, customerId.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(queryStmt);
+
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(queryStmt);
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("order not found"),
+            k404NotFound
+        ));
+        return;
+    }
+
+    std::string currentStatus = getTextColumn(queryStmt, 0);
+    sqlite3_finalize(queryStmt);
+
+    if (currentStatus != "待商家确认") {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("only pending orders can be cancelled by customer"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (!restoreOrderStock(db, orderId, error)) {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to restore stock: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    const char* updateSql =
+        "UPDATE orders "
+        "SET status = '已取消' "
+        "WHERE id = ? "
+        "AND customer_id = ? "
+        "AND status = '待商家确认';";
+
+    sqlite3_stmt* updateStmt = nullptr;
+    rc = sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nullptr);
+
+    if (rc != SQLITE_OK) {
+        execSql(db, "ROLLBACK;", error);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to prepare cancel order update: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_bind_int(updateStmt, 1, orderId);
+    sqlite3_bind_text(updateStmt, 2, customerId.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(updateStmt);
+
+    if (rc != SQLITE_DONE) {
+        sqlite3_finalize(updateStmt);
+        execSql(db, "ROLLBACK;", error);
+        std::string dbError = sqlite3_errmsg(db);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to cancel order: " + dbError),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_finalize(updateStmt);
+
+    int changedRows = sqlite3_changes(db);
+
+    if (changedRows == 0) {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("only pending orders can be cancelled by customer"),
+            k400BadRequest
+        ));
+        return;
+    }
+
+    if (!execSql(db, "COMMIT;", error)) {
+        execSql(db, "ROLLBACK;", error);
+        sqlite3_close(db);
+
+        callback(makeJsonResponse(
+            makeErrorResponse("failed to commit cancel order: " + error),
+            k500InternalServerError
+        ));
+        return;
+    }
+
+    sqlite3_close(db);
+
+    Json::Value data;
+    data["id"] = orderId;
+    data["status"] = "已取消";
 
     Json::Value result;
     result["code"] = 0;
